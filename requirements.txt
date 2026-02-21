@@ -1,0 +1,8 @@
+requests
+nvidia-ml-py # The pynvml library
+Flask
+docker
+boto3
+python-dotenv
+psutil
+jsonpickle
