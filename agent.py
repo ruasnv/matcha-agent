@@ -6,11 +6,11 @@ import requests
 import wsgiref.headers
 import docker
 import json
-import boto3
 import uuid
 import psutil
 import argparse
-from botocore.config import Config
+import signal
+import sys
 from dotenv import load_dotenv
 
 # --- 1. GLOBAL INITIALIZATION ---
@@ -23,35 +23,24 @@ try:
 except:
     HAS_GPU = False
 
+# Fix for certain environments where wsgiref might be finicky
 if not hasattr(wsgiref.headers.Headers, 'items'):
     wsgiref.headers.Headers.items = lambda self: self._headers
 
 def get_unique_device_id():
-    """Generates a persistent hardware fingerprint based on the MAC address."""
     node_id = hex(uuid.getnode()) 
     return f"matcha-{node_id}"
 
-# Identity and Config
 PROVIDER_ID = os.getenv("PROVIDER_ID") or get_unique_device_id()
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "https://matcha-orchestrator.onrender.com")
 
 def get_auth_headers():
-    """Refreshes headers to include the latest API keys from .env"""
     return {
         "X-API-Key": os.getenv("ORCHESTRATOR_API_KEY_PROVIDERS", "debug-provider-key"),
         "Content-Type": "application/json"
     }
 
 client = docker.from_env()
-
-# S3/R2 Setup
-s3_client = boto3.client(
-    's3',
-    endpoint_url=os.getenv('R2_ENDPOINT_URL'),
-    aws_access_key_id=os.getenv('R2_ACCESS_KEY_ID'),
-    aws_secret_access_key=os.getenv('R2_SECRET_ACCESS_KEY'),
-    config=Config(signature_version='s3v4', region_name='auto')
-)
 
 # --- 2. HARDWARE DETECTION ---
 GPU_HANDLE = None
@@ -154,6 +143,23 @@ def register_provider():
         print(f"❌ Registration failed: {e}")
         exit(1)
 
+ # --- 3. SIGNAL HANDLING ---
+def signal_handler(sig, frame):
+    """Gracefully shuts down the agent and notifies the server."""
+    print("\n🛑 Disconnecting from Matcha Kolektif...")
+    try:
+        # We notify the server that this provider is going offline
+        requests.post(
+            f"{ORCHESTRATOR_URL}/provider/heartbeat", 
+            json={"provider_id": PROVIDER_ID, "telemetry": {"status": "offline"}},
+            headers=get_auth_headers(),
+            timeout=2
+        )
+    except:
+        pass
+    print("👋 Goodbye!")
+    sys.exit(0)
+
 def send_heartbeat():
     url = f"{ORCHESTRATOR_URL}/provider/heartbeat"
     payload = {"provider_id": PROVIDER_ID, "telemetry": get_telemetry()}
@@ -179,16 +185,22 @@ def poll_for_task():
     url = f"{ORCHESTRATOR_URL}/provider/get_task"
     try:
         response = requests.post(url, json={"provider_id": PROVIDER_ID}, headers=get_auth_headers())
+        if response.status_code != 200:
+            return False
+            
         data = response.json()
         task = data.get("task")
         if not task: return False
 
         task_id = task['task_id']
+        upload_url = task.get('upload_url') # 👈 The secure "Ticket" URL
         print(f"📦 Assigned Task: {task_id}")
+        
         result_dir = tempfile.mkdtemp()
         
         try:
             print("🏗️ Booting Docker Runner...")
+            # We pass the input_path (download link) to the container
             container = client.containers.run(
                 "runner:latest", 
                 detach=True,
@@ -204,51 +216,64 @@ def poll_for_task():
             logs = container.logs().decode('utf-8')
             
             if result['StatusCode'] == 0:
-                result_url = None
-                if os.listdir(result_dir):
-                    zip_name = f"results_{task_id}"
-                    shutil.make_archive(zip_name, 'zip', result_dir)
-                    artifact_key = f"artifacts/{task_id}.zip"
-                    with open(f"{zip_name}.zip", 'rb') as f:
-                        s3_client.upload_fileobj(f, os.getenv('R2_BUCKET_NAME'), artifact_key)
+                print(f"✅ Execution finished. Preparing upload...")
+                
+                if os.listdir(result_dir) and upload_url:
+                    zip_path = shutil.make_archive(f"results_{task_id}", 'zip', result_dir)
                     
-                    result_url = s3_client.generate_presigned_url(
-                        'get_object', 
-                        Params={'Bucket': os.getenv('R2_BUCKET_NAME'), 'Key': artifact_key}, 
-                        ExpiresIn=604800
-                    )
-                    os.remove(f"{zip_name}.zip")
-                update_task_status(task_id, "COMPLETED", logs, result_url=result_url)
-                print(f"✅ Task {task_id} Success.")
+                    # 🚀 SECURE UPLOAD: Use the Presigned URL (No Keys Needed!)
+                    with open(zip_path, 'rb') as f:
+                        upload_res = requests.put(
+                            upload_url, 
+                            data=f,
+                            headers={'Content-Type': 'application/zip'}
+                        )
+                    
+                    if upload_res.status_code == 200:
+                        print("📤 Results uploaded successfully via secure tunnel.")
+                    
+                    os.remove(zip_path)
+
+                update_task_status(task_id, "COMPLETED", logs)
+                print(f"✨ Task {task_id} fully completed.")
             else:
                 update_task_status(task_id, "FAILED", logs)
+                
             container.remove()
         except Exception as e:
+            print(f"❌ Execution Error: {e}")
             update_task_status(task_id, "FAILED", str(e))
         finally:
             if os.path.exists(result_dir): shutil.rmtree(result_dir)
         return True
-    except:
+    except Exception as e:
+        print(f"❌ Polling Error: {e}")
         return False
 
 # --- 5. EXECUTION ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--enroll", help="The 6-digit token from your Matcha Dashboard")
+    parser.add_argument("--enroll", help="The token from your Matcha Dashboard")
     args = parser.parse_args()
 
+    # 1. Set the signal trap immediately
+    signal.signal(signal.SIGINT, signal_handler)
+    
     if args.enroll:
         enroll_device(args.enroll)
     
-    if not os.getenv("USER_ID"):
+    if not os.getenv("USER_ID") and not os.path.exists(".env"):
         print("🛑 ERROR: USER_ID not found. Run: python agent.py --enroll <token>")
-        exit(1)
+        sys.exit(1)
 
     register_provider()
+    
     last_heartbeat = 0
     while True:
-        if time.time() - last_heartbeat >= 5:
+        # Heartbeat every 10 seconds to keep the dashboard status 'Active'
+        if time.time() - last_heartbeat >= 10:
             send_heartbeat()
             last_heartbeat = time.time()
+            
         poll_for_task()
-        time.sleep(1)
+        time.sleep(2) # Poll every 2 seconds for low latency
