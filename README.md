@@ -17,7 +17,7 @@ This repository contains the provider-side client for the **Matcha Kolektif** ne
 
 ### 1. Clone the repository
 ```bash
-git clone [https://github.com/ruasnv/matcha-agent.git](https://github.com/ruasnv/matcha-agent.git)
+git clone https://github.com/ruasnv/matcha-agent.git
 cd matcha-agent
 ```
 

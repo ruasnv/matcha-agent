@@ -40,7 +40,21 @@ def get_auth_headers():
         "Content-Type": "application/json"
     }
 
-client = docker.from_env()
+# --- Docker Initialization with User-Friendly Error ---
+try:
+    client = docker.from_env()
+    # This line triggers a connection test immediately
+    client.ping() 
+except Exception as e:
+    print("\n" + "!"*60)
+    print("---DOCKER NOT DETECTED---")
+    print("Matcha Agent requires Docker Desktop to run research tasks.")
+    print("\nPLEASE:")
+    print("1. Open Docker Desktop.")
+    print("2. Wait for the whale icon to turn solid green.")
+    print("3. Restart this agent.")
+    print("!"*60 + "\n")
+    sys.exit(1)
 
 # --- 2. HARDWARE DETECTION ---
 GPU_HANDLE = None
