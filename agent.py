@@ -213,17 +213,19 @@ def poll_for_task():
         result_dir = tempfile.mkdtemp()
         
         try:
-            print("🏗️ Booting Docker Runner...")
-            # We pass the input_path (download link) to the container
+            print(f"DEBUG: Starting container for task {task_id}...")
             container = client.containers.run(
-                "runner:latest", 
+                "ruasnv/matcha-runner:latest", 
                 detach=True,
                 environment={
                     "PROJECT_URL": task.get('input_path'),
                     "SCRIPT_PATH": task.get('script_path', 'main.py')
                 },
-                volumes={result_dir: {'bind': '/outputs', 'mode': 'rw'}}
+                volumes={result_dir: {'bind': '/outputs', 'mode': 'rw'}},
+                network_mode="host"
             )
+            print(f"DEBUG: Container {container.short_id} is up. Status: {container.status}")
+           
             update_task_status(task_id, "RUNNING")
             
             result = container.wait()
