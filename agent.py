@@ -215,6 +215,7 @@ def poll_for_task():
         
         try:
             print(f"DEBUG: Launching runner for {task_id}...")
+            print(f"DEBUG: GPU Requesting -> {task.get('input_path')}")
             container = client.containers.run(
             "ruasnv/matcha-runner:latest", 
             detach=True,
