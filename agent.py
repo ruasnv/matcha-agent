@@ -12,6 +12,7 @@ import argparse
 import signal
 import sys
 from dotenv import load_dotenv
+from docker.types import DeviceRequest
 
 # --- 1. GLOBAL INITIALIZATION ---
 load_dotenv()
@@ -215,15 +216,19 @@ def poll_for_task():
         try:
             print(f"DEBUG: Launching runner for {task_id}...")
             container = client.containers.run(
-                "ruasnv/matcha-runner:latest", 
-                detach=True,
-                environment={
-                    "PROJECT_URL": task.get('input_path'),
-                    "SCRIPT_PATH": task.get('script_path', 'main.py')
-                },
-                volumes={result_dir: {'bind': '/outputs', 'mode': 'rw'}},
-                network_mode="host"
-            )
+            "ruasnv/matcha-runner:latest", 
+            detach=True,
+            environment={
+                "PROJECT_URL": task.get('input_path'),
+                "SCRIPT_PATH": task.get('script_path', 'main.py')
+            },
+            volumes={result_dir: {'bind': '/outputs', 'mode': 'rw'}},
+            network_mode="host",
+            # 🚀 THE CRITICAL ADDITION: Request all GPUs
+            device_requests=[
+                DeviceRequest(count=-1, capabilities=[['gpu']])
+            ]
+        )
             
             update_task_status(task_id, "RUNNING")
             
