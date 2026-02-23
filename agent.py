@@ -213,7 +213,8 @@ def poll_for_task():
         result_dir = tempfile.mkdtemp()
         
         try:
-            print(f"DEBUG: Starting container for task {task_id}...")
+            print(f"DEBUG: Launching runner for {task_id}...")
+            # We use detach=True so the Python script keeps control
             container = client.containers.run(
                 "ruasnv/matcha-runner:latest", 
                 detach=True,
@@ -224,47 +225,38 @@ def poll_for_task():
                 volumes={result_dir: {'bind': '/outputs', 'mode': 'rw'}},
                 network_mode="host"
             )
-            print(f"DEBUG: Container {container.short_id} is up. Status: {container.status}")
-           
+            
             update_task_status(task_id, "RUNNING")
             
-            result = container.wait()
-            logs = container.logs().decode('utf-8')
+            # 🚀 REAL-TIME LOG STREAMING
+            # This prevents the freeze because we aren't "waiting" blindly
+            full_logs = ""
+            print("--- DOCKER START ---")
+            for line in container.logs(stream=True, follow=True):
+                chunk = line.decode('utf-8')
+                print(f"🐳 {chunk.strip()}")
+                full_logs += chunk
+            print("--- DOCKER END ---")
+
+            # Get the final exit code with a 5-minute safety timeout
+            result = container.wait(timeout=300) 
             
             if result['StatusCode'] == 0:
                 print(f"✅ Execution finished. Preparing upload...")
-                
-                if os.listdir(result_dir) and upload_url:
-                    zip_path = shutil.make_archive(f"results_{task_id}", 'zip', result_dir)
-                    
-                    # 🚀 SECURE UPLOAD: Use the Presigned URL (No Keys Needed!)
-                    with open(zip_path, 'rb') as f:
-                        upload_res = requests.put(
-                            upload_url, 
-                            data=f,
-                            headers={'Content-Type': 'application/zip'}
-                        )
-                    
-                    if upload_res.status_code == 200:
-                        print("📤 Results uploaded successfully via secure tunnel.")
-                    
-                    os.remove(zip_path)
-
-                update_task_status(task_id, "COMPLETED", logs)
-                print(f"✨ Task {task_id} fully completed.")
+                # ... [Keep your zip and upload logic here] ...
+                update_task_status(task_id, "COMPLETED", full_logs)
             else:
-                update_task_status(task_id, "FAILED", logs)
+                print(f"❌ Container exited with code {result['StatusCode']}")
+                update_task_status(task_id, "FAILED", full_logs)
                 
             container.remove()
+
         except Exception as e:
             print(f"❌ Execution Error: {e}")
             update_task_status(task_id, "FAILED", str(e))
-        finally:
-            if os.path.exists(result_dir): shutil.rmtree(result_dir)
-        return True
-    except Exception as e:
-        print(f"❌ Polling Error: {e}")
-        return False
+            try: container.stop(); container.remove() # Cleanup on crash
+            except: pass
+
 
 # --- 5. EXECUTION ---
 if __name__ == "__main__":
